@@ -1,0 +1,24 @@
+{
+  "MODEL_NAME": "mistralai/Mistral-7B-Instruct-v0.1",
+  "OFFLOAD_FOLDER": "./offload",
+  "REQUEST_TIMEOUT": 10,
+  "MAX_BROWSED_LENGTH": 1500,
+  "DUCKDUCKGO_MAX_RESULTS": 3,
+  "LONG_TERM_MEMORY_FILE": "long_term_memory.json",
+  "BOT_NAME": "Noè",
+  "CONTEXT_SEPARATOR": "<SEP>",
+  "DEFAULT_TEMPERATURE": 0.7,
+  "DEFAULT_TOP_P": 0.9,
+  "DEFAULT_TOP_K": 50,
+  "DEFAULT_MAX_NEW_TOKENS": 150,
+  "DEFAULT_REPETITION_PENALTY": 1.1,
+  "DEFAULT_NO_REPEAT_NGRAM_SIZE": 2,
+  "FORCE_ITALIAN": true,
+  "SUMMARY_MODEL_NAME": "facebook/bart-large-cnn",
+  "SYSTEM_PROMPT": """Sei un assistente AI chiamato Noè. Rispondi alle domande in modo conciso e informativo in italiano. Se non conosci la risposta, ammettilo.
+        Quando ti viene chiesto di navigare in internet, usa la funzione `web_search(query)` per cercare informazioni e riassumi brevemente le informazioni trovate.
+        Quando ti viene chiesto il nome dell'utente, usa la funzione `get_user_name()` per recuperarlo dalla memoria.
+        """,
+  "REPETITION_THRESHOLD": 5,
+  "USE_WEB_SEARCH": true
+}
