@@ -1,16 +1,17 @@
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM
 from bs4 import BeautifulSoup
 import requests
 import re
 from duckduckgo_search import DDGS
-from typing import Optional, Dict, Any, List, Callable #Aggiunto Callable
+from typing import Optional, Dict, Any, List, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
 
 class ModelLoader:
     def __init__(self, config: Dict[str, Any]):
+        config = dict(config)  # Forza il tipo dict (sicurezza)
         self.config = config
         self.device = self.get_device()
         self.offload_folder = self.config.get("OFFLOAD_FOLDER", "./offload")
@@ -26,14 +27,6 @@ class ModelLoader:
         logger.info(f"Using device: {device}")
         return device
 
-    def create_quantization_config(self) -> BitsAndBytesConfig:
-        compute_dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-        return BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=compute_dtype,
-        )
-
     def load_model(self) -> torch.nn.Module:
         model_name = self.config.get("MODEL_NAME")
         logger.info(f"Loading model: {model_name}")
@@ -41,7 +34,6 @@ class ModelLoader:
             model = AutoModelForCausalLM.from_pretrained(
                 model_name,
                 device_map="auto",
-                quantization_config=self.create_quantization_config(),
                 offload_folder=self.offload_folder,
                 torch_dtype=(
                     torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -70,27 +62,19 @@ class ModelLoader:
 
 class WebUtils:
     def __init__(self, config: Dict[str, Any]):
+        config = dict(config)  # Forza il tipo dict (sicurezza)
         self.config = config
-        self.summary_model_name = self.config.get("SUMMARY_MODEL_NAME", "facebook/bart-large-cnn") # Example model
-        try:
-            self.summary_tokenizer = AutoTokenizer.from_pretrained(self.summary_model_name)
-            self.summary_model = AutoModelForCausalLM.from_pretrained(self.summary_model_name)
-            self.summary_model.eval()
-        except Exception as e:
-            logger.error(f"Error loading summarization model: {e}", exc_info=True)
-            self.summary_tokenizer = None
-            self.summary_model = None
-
 
     def browse_web(self, url: str) -> Optional[str]:
         timeout = self.config.get("REQUEST_TIMEOUT", 10)
+        max_length = self.config.get("MAX_BROWSED_LENGTH", 1500)
         try:
             response = requests.get(url, timeout=timeout)
             response.raise_for_status()
             soup = BeautifulSoup(response.content, "html.parser")
             text = " ".join(p.get_text() for p in soup.find_all("p"))
             text = re.sub(r"\s+", " ", text).strip()
-            return text  # Return full text for summarization
+            return text[:max_length]
         except requests.exceptions.RequestException as e:
             logger.error(f"Errore nella richiesta HTTP per {url}: {e}")
             return None
@@ -98,43 +82,32 @@ class WebUtils:
             logger.error(f"Errore nella navigazione web per {url}: {e}", exc_info=True)
             return None
 
-    def summarize_text(self, text: str, max_length: int = 500, min_length: int = 100) -> str:
-        """Summarizes the given text using a pre-trained summarization model."""
-        if not self.summary_model or not self.summary_tokenizer:
-            logger.warning("Summarization model not loaded. Returning original text.")
-            return text[:max_length]  #Basic Truncation fallback
-
-        try:
-            inputs = self.summary_tokenizer.encode(text, return_tensors="pt", max_length=1024, truncation=True)
-            summary_ids = self.summary_model.generate(inputs, max_length=max_length, min_length=min_length, length_penalty=2.0, num_beams=4, early_stopping=True)
-            summary = self.summary_tokenizer.decode(summary_ids[0], skip_special_tokens=True)
-            return summary
-        except Exception as e:
-            logger.error(f"Error during summarization: {e}", exc_info=True)
-            return text[:max_length]  # Truncation fallback
-
-
-    def retrieve_information(self, query: str) -> Optional[str]: #Removed search_cache
+    def retrieve_information(self, query: str, search_cache: Dict[str, str]) -> Optional[str]:
         duckduckgo_max_results = self.config.get("DUCKDUCKGO_MAX_RESULTS", 3)
-        max_browsed_length = self.config.get("MAX_BROWSED_LENGTH", 1500) #For fallback
+        if query in search_cache:
+            logger.info(f"Using cached search result for query: {query}")
+            return search_cache[query]
 
         try:
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=duckduckgo_max_results))
+                logger.debug(f"DuckDuckGo results: {results}")
+
                 if results:
                     first_result = results[0]
-                    title = first_result.get('title', 'No Title')
-                    url = first_result.get('href', '')
-                    snippet = first_result.get('body', 'No Summary')
-                    web_content = self.browse_web(url)
+                    logger.debug(f"First result: {first_result}, type: {type(first_result)}")
 
-                    if web_content:
-                        summary = self.summarize_text(web_content, max_length=max_browsed_length)
-                        info = f"{title}\n{snippet}\nRiassunto del contenuto web: {summary}"
+                    if isinstance(first_result, dict):  # Controllo del tipo ESSENZIALE
+                        title = first_result.get('title', 'No Title')
+                        url = first_result.get('href', '')
+                        snippet = first_result.get('body', 'No Summary')
+                        web_content = self.browse_web(url)
+                        info = f"{title}\n{snippet}\n{web_content or ''}"
+                        search_cache[query] = info
+                        return info
                     else:
-                        info = f"{title}\n{snippet}\nNessun contenuto web disponibile." # Explicit fallback
-
-                    return info
+                        logger.warning(f"Unexpected result type from DuckDuckGo: {type(first_result)}")
+                        return None
                 else:
                     return None
         except Exception as e:
@@ -144,36 +117,73 @@ class WebUtils:
 
 class PromptBuilder:
     def __init__(self, config: Dict[str, Any]):
+        config = dict(config)  # Forza il tipo dict (sicurezza)
         self.config = config
         self.bot_name = self.config.get("BOT_NAME")
         self.force_italian = self.config.get("FORCE_ITALIAN", False)
-        self.system_prompt = self.config.get("SYSTEM_PROMPT", f"""Sei un assistente AI chiamato {self.bot_name}. Rispondi alle domande in modo conciso e informativo in italiano. Se non conosci la risposta, ammettilo.
-        Quando ti viene chiesto di navigare in internet, usa la funzione `web_search(query)` per cercare informazioni e riassumi brevemente le informazioni trovate.
-        Quando ti viene chiesto il nome dell'utente, usa la funzione `get_user_name()` per recuperarlo dalla memoria.
-        """)
-
+        self.system_prompt = self.config.get("SYSTEM_PROMPT", "Sei un assistente AI utile.")  # System prompt
 
     def build_prompt(
-        self, user_input: str, long_term_memory: str, available_functions: Dict[str, Callable], is_first_turn: bool = False
+        self, user_input: str, short_term_memory: str, long_term_memory: str, web_info: str = ""
     ) -> str:
-        """Costruisce il prompt."""
+        """Costruisce il prompt per il modello."""
 
-        prompt = ""
-        if is_first_turn:
-            prompt += self.system_prompt #Only add system prompt on first turn
+        prompt = self.system_prompt  # Usa il system prompt configurabile
 
         if self.force_italian:
             prompt += " Rispondi sempre in italiano."
 
-        # Aggiungi la memoria a lungo termine
         if long_term_memory:
             prompt += f"\nRicorda: {long_term_memory}"
 
-        #Describe available functions:
-        prompt += "\n\nPuoi utilizzare le seguenti funzioni:\n"
-        for function_name, function in available_functions.items():
-            prompt += f"- `{function_name}(...)`: {function.__doc__}\n"
+        if short_term_memory:
+            prompt += f"\nUltima interazione: {short_term_memory}"
 
+        if web_info:
+            prompt += f"\nInformazioni dal web: {web_info}"  # Aggiungi le informazioni dal web
 
         prompt += f"\nUtente: {user_input}\n{self.bot_name}:"
         return prompt
+
+class TextGenerator:
+    def __init__(self, config: Dict[str, Any], model: torch.nn.Module, tokenizer: AutoTokenizer):
+        self.config = config
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")  # Recupera il device qui
+        self.max_new_tokens = self.config.get("MAX_NEW_TOKENS", 256)  # Imposta un valore di default
+        self.temperature = self.config.get("TEMPERATURE", 0.7)
+        self.top_p = self.config.get("TOP_P", 0.9)
+        self.repetition_penalty = self.config.get("REPETITION_PENALTY", 1.1)
+        self.use_web_search = self.config.get("USE_WEB_SEARCH", True) #Flag per attivare o disattivare la ricerca web
+
+
+
+    def generate_response(self, prompt: str, web_utils: "WebUtils", user_input: str) -> str:
+        """Genera una risposta dal modello, potenzialmente usando la ricerca web."""
+        try:
+            input_ids = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
+            with torch.no_grad():
+                output = self.model.generate(
+                    input_ids,
+                    max_new_tokens=self.max_new_tokens,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    repetition_penalty=self.repetition_penalty,
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    eos_token_id=self.tokenizer.eos_token_id,
+                    do_sample=True
+                )
+            response = self.tokenizer.decode(output[0], skip_special_tokens=True)
+
+            # Pulisci la risposta rimuovendo il prompt originale
+            user_input_index = prompt.find("Utente:")
+            if user_input_index != -1:
+                response = response[user_input_index + len("Utente:") + len(prompt.split("Utente:")[1]):].strip()
+            else:
+                response = response.replace(prompt.split("Utente:")[0], "").strip()
+
+            return response
+        except Exception as e:
+            logger.error(f"Error generating response: {e}", exc_info=True)
+            return "Si è verificato un errore durante la generazione della risposta."
